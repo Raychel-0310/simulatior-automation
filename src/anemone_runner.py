@@ -1,12 +1,16 @@
 import subprocess
 import json
 import tempfile
+import random
 from pathlib import Path
+
+# ダミーモード切替
+USE_DUMMY = True  # ← まず True にしておく（シミュレータ無しで動作テスト）
 
 ANEMONE_EXE = Path(__file__).resolve().parent.parent / "anemone.exe"
 
 def run_anemone(pcd_path, params):
-    """anemone.exeを呼び出して結果(JSON)を受け取る"""
+    """anemone.exeを呼び出して結果(JSON)を受け取る。ダミーモードあり。"""
 
     # agent_loop.py から来るパラメータのキーに合わせる
     cfg = {
@@ -16,6 +20,19 @@ def run_anemone(pcd_path, params):
         "stages": params.get("stages", 1)
     }
 
+    # もしダミーモードならランダム値を返してすぐ終わる
+    if USE_DUMMY:
+        thrust_density = 5000 + random.uniform(-1000, 5000)
+        current_density = thrust_density * 1e-9
+        power = thrust_density / 1e6
+        print(f"[DUMMY] Simulated thrust_density={thrust_density:.3f}")
+        return {
+            "thrust_density": thrust_density,
+            "current_density": current_density,
+            "power": power
+        }
+
+    # ======= 本番実行モード =======
     # 一時cfgファイル作成
     with tempfile.NamedTemporaryFile("w", delete=False, suffix=".json") as cfg_file:
         json.dump(cfg, cfg_file)

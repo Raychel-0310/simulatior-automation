@@ -25,30 +25,79 @@ Return ONLY JSON (no explanations) like:
 {"V_kV": 35.0, "gap_m": 0.0012, "phi": 1.2, "stages": 3, "note": "reason"}
 """
 
+# --- 先頭の import 群はそのまま ---
+
+from dotenv import load_dotenv
+load_dotenv()
+
+from openai import OpenAI
+
+# ★ ここを置き換え：Ollama でも OpenAI SDK を使うが base_url を差し替える
+OPENAI_BASE_URL = os.getenv("OPENAI_BASE_URL", "http://localhost:11434/v1")
+OPENAI_API_KEY  = os.getenv("OPENAI_API_KEY", "ollama")     # なんでもOK（必須引数）
+OPENAI_MODEL    = os.getenv("OPENAI_MODEL", "llama3.1:8b")  # 取得したモデル名
+USE_GPT         = os.getenv("USE_GPT", "1") == "1"          # 環境変数でON/OFF切替
+
+client = OpenAI(base_url=OPENAI_BASE_URL, api_key=OPENAI_API_KEY)
+
+SYSTEM_PROMPT = """
+You are an optimization orchestrator for a Solid-State Electroaerodynamic Propulsion (SSEP) simulator.
+Goal: maximize thrust_density while keeping parameters within safe bounds.
+Always propose the next params as a strict JSON with keys: V_kV (number), gap_m (number), phi (number), stages (integer), and an optional note.
+Hard bounds:
+- 15 <= V_kV <= 40
+- 0.0005 <= gap_m <= 0.006
+- 0.8 <= phi <= 1.8
+- 1 <= stages <= 6
+Return ONLY JSON. No prose, no markdown. Example:
+{"V_kV": 35.0, "gap_m": 0.0012, "phi": 1.2, "stages": 3, "note": "reason"}
+""".strip()
+
 def propose_next(history):
     """
     history: [{params: {...}, metrics: {...}}, ...]
     returns: dict like {"V_kV": 35.0, "gap_m": 0.0012, "phi": 1.2, "stages": 3, "note": "..."}
     """
+    if not USE_GPT:
+        # 近傍探索のフォールバック（GPT未使用モード）
+        last = history[-1]["params"] if history else {"V_kV":30.0,"gap_m":0.002,"phi":1.2,"stages":3}
+        step = 0.98
+        return {
+            "V_kV": max(15.0, min(40.0, last["V_kV"]*step)),
+            "gap_m": max(0.0005, min(0.006, last["gap_m"]*step)),
+            "phi":  min(1.8, last["phi"]*1.02),
+            "stages": last["stages"],
+        }
+
     user_content = (
-        "We will iterate. Here is the history as JSON.\n"
+        "We iterate. Here is the history as JSON.\n"
         "Each item has params (V_kV,gap_m,phi,stages) and metrics (thrust_density,current_density,power).\n"
         f"{json.dumps(history, ensure_ascii=False)}\n"
-        "Propose the next parameters within the hard bounds. Output strict JSON only."
+        "Propose the next parameters within the hard bounds.\n"
+        "Return STRICT JSON ONLY with keys: V_kV, gap_m, phi, stages, and optional note."
     )
 
-    # ★ Chat Completions の JSONモード（SDK 2.xで安定）
+    # ★ Ollama では response_format が効かないことが多いので使わない
     resp = client.chat.completions.create(
-        model="gpt-4o-mini",  # 軽くて速い。必要なら gpt-4.1 / gpt-4o に変更OK
+        model=OPENAI_MODEL,
         messages=[
             {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": user_content},
+            {"role": "user",   "content": user_content},
         ],
-        response_format={"type": "json_object"},
-        temperature=0
+        temperature=0,
+        max_tokens=300,
     )
-    content = resp.choices[0].message.content
-    return json.loads(content)
+    text = resp.choices[0].message.content.strip()
+
+    # ★ 念のため {...} を抽出してから JSON パース（前後のノイズ対策）
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        import re
+        m = re.search(r"\{.*\}", text, re.S)
+        if not m:
+            raise RuntimeError(f"Model did not return JSON: {text[:200]}")
+        return json.loads(m.group(0))
 
 def clamp_params(p: Dict[str, Any]) -> Dict[str, Any]:
     # 念のため上下限をサニタイズ
